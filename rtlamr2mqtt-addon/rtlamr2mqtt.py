@@ -21,6 +21,7 @@ import yaml
 import requests
 import usb.core
 import paho.mqtt.publish as publish
+import paho.mqtt.client as mqtt
 
 from paho.mqtt import MQTTException
 
@@ -91,6 +92,8 @@ def list_intersection(a, b):
     return result[0] if result else None
 
 class MqttClient:
+    HA_STATUS_TOPIC = "homeassistant/status"
+
     def __init__(self, mqtt_config, listen_for_homeassistant_status=False):
         log_message('Configured MQTT sender:')
         self.d = {}
@@ -102,6 +105,8 @@ class MqttClient:
         self.d['base_topic'] = mqtt_config.get('base_topic', 'rtlamr')
         self.d['availability_topic'] = '{}/status'.format(self.d['base_topic'])
         self.listen_for_homeassistant_status = listen_for_homeassistant_status
+        self.homeassistant_birth_message_received = False
+        self.mqttc = None
         tls_enabled = mqtt_config.get('tls_enabled', False)
         tls_ca = mqtt_config.get('tls_ca', '/etc/ssl/certs/ca-certificates.crt')
         tls_cert = mqtt_config.get('tls_cert', None)
@@ -111,7 +116,29 @@ class MqttClient:
         if tls_enabled:
             self.d['tls'] = { 'ca_certs': tls_ca, 'certfile': tls_cert, 'keyfile': tls_keyfile, 'cert_reqs': cert_reqs }
         self.__log_mqtt_params(**self.d)
+        if self.listen_for_homeassistant_status:
+            self.connect_to_ha_messages()
 
+    def connect_to_ha_messages(self):
+        mqttc = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        mqttc.on_message = self.on_ha_message
+        mqttc.on_connect = self.on_connect
+        if self.d['username'] and self.d['password']:
+            mqttc.username_pw_set(self.d['username'], self.d['password'])
+        mqttc.set_tls(self.d['tls'])
+        mqttc.connect(self.d['hostname'], self.d['port'])
+        mqttc.loop_start()
+        self.mqttc = mqttc
+
+    def on_ha_message(self, client, userdata, msg):
+        if msg == 'online':
+            self.homeassistant_birth_message_received = True
+
+    def on_connect(self, client, userdata, flags, rc):
+        log_message('Connected to MQTT broker with result code {}'.format(rc))
+        if self.listen_for_homeassistant_status and not rc.is_failure:
+            self.mqttc.subscribe(self.HA_STATUS_TOPIC)
+        
     def __get_auth(self):
         if self.d['username'] and self.d['password']:
             return { 'username':self.d['username'], 'password': self.d['password'] }
@@ -575,9 +602,10 @@ if __name__ == "__main__":
                         attributes = {}
                         if config['mqtt']['ha_autodiscovery']:
                             # if HA Autodiscovery is enabled, send the MQTT auto discovery payload once for each meter
-                            if not meters[meter_id]['sent_HA_discovery']:
+                            if not meters[meter_id]['sent_HA_discovery'] or mqtt_client.homeassistant_birth_message_received:
                                 send_ha_autodiscovery(meters[meter_id], config['mqtt'])
                                 meters[meter_id]['sent_HA_discovery'] = True
+                                mqtt_client.homeassistant_birth_message_received = False
                         else:
                             msg_payload = formatted_reading
 
