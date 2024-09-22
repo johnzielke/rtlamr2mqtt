@@ -90,8 +90,8 @@ def list_intersection(a, b):
     result = list(set(a).intersection(set(b)))
     return result[0] if result else None
 
-class MqttSender:
-    def __init__(self, mqtt_config):
+class MqttClient:
+    def __init__(self, mqtt_config, listen_for_homeassistant_status=False):
         log_message('Configured MQTT sender:')
         self.d = {}
         self.d['hostname'] = mqtt_config.get('host', 'localhost')
@@ -101,6 +101,7 @@ class MqttSender:
         self.d['client_id'] = mqtt_config.get('client_id', 'rtlamr2mqtt')
         self.d['base_topic'] = mqtt_config.get('base_topic', 'rtlamr')
         self.d['availability_topic'] = '{}/status'.format(self.d['base_topic'])
+        self.listen_for_homeassistant_status = listen_for_homeassistant_status
         tls_enabled = mqtt_config.get('tls_enabled', False)
         tls_ca = mqtt_config.get('tls_ca', '/etc/ssl/certs/ca-certificates.crt')
         tls_cert = mqtt_config.get('tls_cert', None)
@@ -173,8 +174,8 @@ def shutdown(signum, frame):
         log_message('Graceful shutdown.')
         # Are we running in LISTEN_ONLY mode?
         if not running_in_listen_only_mode:
-            if mqtt_sender:
-                mqtt_sender.publish(topic=availability_topic, payload='offline', retain=True)
+            if mqtt_client:
+                mqtt_client.publish(topic=availability_topic, payload='offline', retain=True)
         # Graceful termination
         sys.exit(0)
 
@@ -318,7 +319,7 @@ def send_ha_autodiscovery(meter, mqtt_config):
     }
     if meter['device_class'] is not None:
         discover_payload['device_class'] = meter['device_class']
-    mqtt_sender.publish(topic=discover_topic, payload=dumps(discover_payload), qos=1, retain=True)
+    mqtt_client.publish(topic=discover_topic, payload=dumps(discover_payload), qos=1, retain=True)
 
 def tickle_rtl_tcp(remote_server):
     """
@@ -359,7 +360,7 @@ def listen_mode():
     external_rtl_tcp = False
     if running_as_addon:
         config = load_config(sys.argv)
-        mqtt_sender = MqttSender(config['mqtt'])
+        mqtt_client = MqttClient(config['mqtt'])
         debug_topic = '{}/debug'.format(config['mqtt']['base_topic'])
         if re.match('127\.0\.0\.|localhost', config['general']['rtltcp_server']) is None:
             external_rtl_tcp = True
@@ -398,7 +399,7 @@ def listen_mode():
                 except JSONDecodeError:
                     json_output = None
             if json_output is not None and running_as_addon:
-                mqtt_sender.publish(topic=debug_topic, payload=dumps(json_output), retain=False)
+                mqtt_client.publish(topic=debug_topic, payload=dumps(json_output), retain=False)
 
 # Main
 if __name__ == "__main__":
@@ -493,13 +494,13 @@ if __name__ == "__main__":
     #################################################################
 
     # Main loop
-    mqtt_sender = MqttSender(config['mqtt'])
+    mqtt_client = MqttClient(config['mqtt'])
     availability_topic = '{}/status'.format(config['mqtt']['base_topic'])
     while True:
         if not external_rtl_tcp:
             reset_usb_device(usb_port)
 
-        mqtt_sender.publish(topic=availability_topic, payload='online', retain=True)
+        mqtt_client.publish(topic=availability_topic, payload='online', retain=True)
 
         # Is this the first time are we executing this loop? Or is rtltcp running?
         if not external_rtl_tcp and ('rtltcp' not in locals() or rtltcp.poll() is not None):
@@ -584,8 +585,8 @@ if __name__ == "__main__":
                         attributes.update(json_output['Message'])
                         attribute_topic = meters[meter_id]['attribute_topic']
                         state_topic = meters[meter_id]['state_topic']
-                        mqtt_sender.publish(topic=attribute_topic, payload=json.dumps(attributes), retain=True)
-                        mqtt_sender.publish(topic=state_topic, payload=formatted_reading, retain=True)
+                        mqtt_client.publish(topic=attribute_topic, payload=json.dumps(attributes), retain=True)
+                        mqtt_client.publish(topic=state_topic, payload=formatted_reading, retain=True)
                         meter_readings[meter_id] += 1
 
             if config['general']['sleep_for'] > 0: # We have a sleep_for parameter. Let's go to sleep!
